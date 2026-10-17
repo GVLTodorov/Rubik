@@ -1,0 +1,17 @@
+# Render Blueprint: hosts the Docker image as one free web service.
+# Render routes a single port, so the service uses 8080, where nginx serves the UI and forwards
+# /api, /health and /swagger to the API. Swagger's UI button points at the same origin.
+services:
+  - type: web
+    name: rubik
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    # CI deploys after the tests pass (the deploy job in .github/workflows/ci.yml).
+    autoDeploy: false
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: links__ui
+        value: /

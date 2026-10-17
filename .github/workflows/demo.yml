@@ -1,0 +1,88 @@
+name: Demo
+
+# Records the README demo (docs/demo.gif) against the real Docker image: Swagger UI opens, its
+# UI button opens the React app, Scramble plays, then Solve plays the solution stage by stage.
+# Manual only, like PlanningPoker's demo workflows: each run commits a new GIF of about 10 MB to
+# main, so it isn't worth doing on every push. Trigger it from the Actions tab when the UI changes.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    name: Record demo
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # The same image ci.yml builds: the API on 5080 and the UI on 5173, so Swagger's UI button
+      # (links:ui = http://localhost:5173) opens the app exactly as it does locally.
+      - name: Build the app image
+        run: docker build -t rubik:demo .
+
+      - name: Start the app
+        run: |
+          docker run -d --name rubik -p 5080:5080 -p 5173:5173 rubik:demo
+          timeout 60 bash -c 'until curl -sf http://localhost:5080/health >/dev/null && curl -sf http://localhost:5173 >/dev/null; do sleep 1; done'
+
+      - name: Build the recorder
+        run: dotnet build backend/Rubik.Demo/Rubik.Demo.csproj -c Release
+
+      - name: Install Playwright's Chromium
+        run: pwsh backend/Rubik.Demo/bin/Release/net10.0/playwright.ps1 install --with-deps chromium
+
+      - name: Record demo
+        run: |
+          mkdir -p artifacts/demo-video
+          dotnet run --project backend/Rubik.Demo -c Release --no-build -- \
+            http://localhost:5080 artifacts/demo-video | tee artifacts/demo-video.log
+
+      - name: Show app log
+        if: always()
+        run: docker logs rubik || true
+
+      - name: Stop the app
+        if: always()
+        run: docker rm -f rubik || true
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # The recorder prints one VIDEO_PATH per tab, in order (Swagger, then the app); concat joins
+      # them. GitHub strips <video> tags from READMEs, so the embed is a GIF. 10 fps, 720 px wide
+      # and a 64-colour palette keep it near 10 MB while the solution panel's text stays readable;
+      # dither=none avoids dithering noise on the flat UI colours.
+      - name: Convert to GIF
+        run: |
+          mapfile -t videos < <(sed -n 's/^VIDEO_PATH=//p' artifacts/demo-video.log)
+          mkdir -p docs
+          ffmpeg -y -i "${videos[0]}" -i "${videos[1]}" -filter_complex \
+            "[0:v][1:v]concat=n=2:v=1:a=0,fps=10,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=64:stats_mode=diff[p];[s1][p]paletteuse=dither=none" \
+            docs/demo.gif
+
+      - name: Commit the demo GIF
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/demo.gif
+          if git diff --cached --quiet; then
+            echo "Demo GIF unchanged, nothing to commit."
+          else
+            git commit -m "chore: refresh demo gif"
+            # main may have moved since this run's checkout; this job only touches its own file.
+            git pull --rebase origin main
+            git push
+          fi

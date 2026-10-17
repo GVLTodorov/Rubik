@@ -1,0 +1,270 @@
+name: CI
+
+# Tests the backend and frontend, then builds one Docker image with the API (5080) and the
+# React UI (5173). The image is pushed to GHCR on main pushes, releases and manual runs; pull
+# requests only build it. Main pushes then redeploy the hosted app on Render.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  backend:
+    name: backend tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore Rubik.sln
+
+      - name: Build
+        run: dotnet build Rubik.sln --no-restore
+
+      - name: Format check
+        run: dotnet format Rubik.sln --verify-no-changes --no-restore
+
+      - name: Unit tests
+        run: dotnet test Rubik.Test/Rubik.Test.csproj --no-build --logger "trx;LogFileName=unit-tests.trx" --collect:"XPlat Code Coverage" --results-directory TestResults
+
+      - name: Integration tests
+        run: dotnet test Rubik.Integration.Test/Rubik.Integration.Test.csproj --no-build --logger "trx;LogFileName=integration-tests.trx" --collect:"XPlat Code Coverage" --results-directory TestResults
+
+      - name: Acceptance output (console runner)
+        run: dotnet run --project Rubik.Console --no-build -- --plain
+
+      # Merges unit + integration coverage into one set of badges. Source-generated logging
+      # code (*.g.cs) is left out.
+      - name: Coverage report
+        uses: danielpalme/ReportGenerator-GitHub-Action@v5
+        with:
+          reports: 'backend/TestResults/*/coverage.cobertura.xml'
+          targetdir: coverage-report
+          reporttypes: 'Badges;MarkdownSummaryGithub'
+          filefilters: '-*.g.cs'
+
+      - name: Coverage summary
+        working-directory: .
+        run: cat coverage-report/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage badges
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-backend
+          path: |
+            coverage-report/badge_linecoverage.svg
+            coverage-report/badge_branchcoverage.svg
+
+      - name: Publish test report
+        uses: dorny/test-reporter@v3
+        if: always()
+        with:
+          name: Backend Test Results
+          path: 'backend/TestResults/*.trx'
+          reporter: dotnet-trx
+          fail-on-error: false
+
+  frontend:
+    name: frontend tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Unit tests
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+      # ReportGenerator runs on .NET.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Coverage report
+        uses: danielpalme/ReportGenerator-GitHub-Action@v5
+        with:
+          reports: 'frontend/coverage/cobertura-coverage.xml'
+          targetdir: coverage-report
+          reporttypes: 'Badges;MarkdownSummaryGithub'
+
+      - name: Coverage summary
+        working-directory: .
+        run: cat coverage-report/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage badges
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-frontend
+          path: |
+            coverage-report/badge_linecoverage.svg
+            coverage-report/badge_branchcoverage.svg
+
+  # Commits the latest line/branch badges for each app to the `badges` branch, which
+  # README.md links to. Only main pushes update them, so PRs can't overwrite main's numbers.
+  coverage-badges:
+    name: Publish coverage badges
+    needs: [backend, frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download coverage badges
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-*
+          path: incoming
+
+      - name: Push to the badges branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git init -q badges && cd badges
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin badges 2>/dev/null; then
+            git checkout -q -b badges FETCH_HEAD
+          else
+            git checkout -q --orphan badges
+          fi
+
+          rm -rf coverage
+          for dir in ../incoming/coverage-*; do
+            app="${dir##*/coverage-}"
+            mkdir -p "coverage/$app"
+            cp "$dir/badge_linecoverage.svg" "coverage/$app/line.svg"
+            cp "$dir/badge_branchcoverage.svg" "coverage/$app/branch.svg"
+          done
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Coverage unchanged."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Update coverage badges for ${GITHUB_SHA::7}"
+          git push -q origin badges
+
+  docker:
+    name: Docker image
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the Container registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are pushed in priority order, and the GHCR package page's "docker pull" command uses
+      # the last one pushed. latest gets the lowest priority so the page shows `rubik:latest`
+      # instead of `rubik:sha-…`, as PlanningPoker's and RetroBoard's do.
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}},priority=1
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Redeploys https://rubik-xi5x.onrender.com once everything above has passed. Render's own
+  # auto-deploy is off (render.yaml), so a failing build never goes live. The deploy hook URL can
+  # only trigger a deploy of this one service, so it is safer to store than an account API key.
+  deploy:
+    name: Deploy to Render
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: render
+      url: https://rubik-xi5x.onrender.com
+
+    steps:
+      - name: Trigger Render deploy
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK_URL is not set, so nothing was deployed."
+            exit 0
+          fi
+          curl -fsS -X POST "$DEPLOY_HOOK_URL" > /dev/null
+          echo "Deploy triggered. Render builds and swaps it in within a few minutes."

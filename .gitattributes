@@ -1,0 +1,9 @@
+# Check out every text file with LF, even on Windows (core.autocrlf=true). Prettier and the Linux
+# containers expect LF; CRLF checkouts made `npm run format:check` flag every file.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.pdf binary
+*.gif binary
+*.webm binary

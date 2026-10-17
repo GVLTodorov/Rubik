@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // nodeReuse/UseSharedCompilation/UseRazorBuildServer off: no MSBuild nodes,
+      // VBCSCompiler or Razor server processes are left running after the build.
+      "label": "backend: build",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "build",
+        "${workspaceFolder}/backend/Rubik.Api/Rubik.Api.csproj",
+        "-nodeReuse:false",
+        "-p:UseSharedCompilation=false",
+        "-p:UseRazorBuildServer=false",
+        "/property:GenerateFullPaths=true",
+        "/consoleloggerparameters:NoSummary"
+      ],
+      "problemMatcher": "$msCompile",
+      "group": "build"
+    },
+    {
+      // Run once after cloning (Terminal > Run Task... > frontend: install).
+      "label": "frontend: install",
+      "type": "npm",
+      "script": "install",
+      "path": "frontend",
+      "problemMatcher": []
+    }
+  ]
+}

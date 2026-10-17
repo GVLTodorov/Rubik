@@ -1,0 +1,23 @@
+# .NET build output
+bin/
+obj/
+TestResults/
+artifacts/
+*.user
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Local environment overrides
+.env.local
+*.local
+
+# Editors and OS (the shared .vscode/ config is committed; personal files are not)
+.vs/
+.idea/
+.vscode/*.local.json
+.vscode/.ropeproject
+.DS_Store
+Thumbs.db

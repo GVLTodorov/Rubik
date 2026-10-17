@@ -1,0 +1,17 @@
+# Build context is the repo root; only backend/, frontend/ and docker/ are needed.
+.git
+.github
+.vscode
+.claude
+*.md
+
+**/node_modules
+**/dist
+**/coverage
+**/bin
+**/obj
+**/TestResults
+**/.vs
+**/.env.local
+
+backend/*.Test
